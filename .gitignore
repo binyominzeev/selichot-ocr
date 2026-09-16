@@ -1,0 +1,9 @@
+# API keys and local environment configuration
+.env
+
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+
+Hebrewbooks_org_*.pdf
