@@ -61,27 +61,52 @@ except ImportError as e:
     PIL_IMPORT_ERROR = e
 
 
+def get_pdf_page_count(pdf_path: Path) -> int:
+    """A PDF teljes oldalszámának lekérdezése (pdfinfo, poppler-utils)."""
+    result = subprocess.run(["pdfinfo", str(pdf_path)], capture_output=True, text=True)
+    if result.returncode != 0:
+        print("[hiba] pdfinfo sikertelen:", result.stderr, file=sys.stderr)
+        sys.exit(1)
+    for line in result.stdout.splitlines():
+        if line.startswith("Pages:"):
+            return int(line.split(":", 1)[1].strip())
+    print("[hiba] pdfinfo kimenetéből nem sikerült kiolvasni az oldalszámot.", file=sys.stderr)
+    sys.exit(1)
+
+
 def convert_pdf_to_images(pdf_path: Path, images_dir: Path, dpi: int) -> list[Path]:
     """PDF oldalak PNG képekké alakítása pdftoppm-mel (poppler-utils)."""
     images_dir.mkdir(parents=True, exist_ok=True)
     prefix = images_dir / "page"
 
-    # Ha már léteznek képek, ne alakítsuk újra (időt spórolunk 200 oldalnál)
+    total_pages = get_pdf_page_count(pdf_path)
     existing = sorted(images_dir.glob("page-*.png"))
-    if existing:
+    existing_nums = {page_number_from_filename(p) for p in existing}
+    missing_nums = sorted(set(range(1, total_pages + 1)) - existing_nums)
+
+    if existing and not missing_nums:
         print(f"[info] {len(existing)} kép már létezik a {images_dir} mappában, "
               f"a konvertálás kihagyva.")
         return existing
 
-    print(f"[info] PDF -> kép konvertálás ({dpi} dpi)...")
-    cmd = ["pdftoppm", "-r", str(dpi), "-png", str(pdf_path), str(prefix)]
+    if existing:
+        print(f"[info] {len(existing)} kép már létezik, de a PDF {total_pages} oldalas -- "
+              f"a hiányzó {len(missing_nums)} oldal képét most generálom le "
+              f"({missing_nums[0]}. oldaltól).")
+    else:
+        print(f"[info] PDF -> kép konvertálás ({dpi} dpi)...")
+
+    cmd = ["pdftoppm", "-r", str(dpi), "-png",
+           "-f", str(missing_nums[0]), "-l", str(missing_nums[-1]),
+           str(pdf_path), str(prefix)] if existing else \
+          ["pdftoppm", "-r", str(dpi), "-png", str(pdf_path), str(prefix)]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print("[hiba] pdftoppm sikertelen:", result.stderr, file=sys.stderr)
         sys.exit(1)
 
     images = sorted(images_dir.glob("page-*.png"))
-    print(f"[info] {len(images)} oldal képe elkészült.")
+    print(f"[info] {len(images)} oldal képe elérhető.")
     return images
 
 
