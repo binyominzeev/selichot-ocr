@@ -52,6 +52,14 @@ import sys
 import time
 from pathlib import Path
 
+try:
+    from PIL import Image, UnidentifiedImageError
+    PIL_IMPORT_ERROR = None
+except ImportError as e:
+    Image = None
+    UnidentifiedImageError = Exception
+    PIL_IMPORT_ERROR = e
+
 
 def convert_pdf_to_images(pdf_path: Path, images_dir: Path, dpi: int) -> list[Path]:
     """PDF oldalak PNG képekké alakítása pdftoppm-mel (poppler-utils)."""
@@ -82,6 +90,42 @@ def page_number_from_filename(path: Path) -> int:
     stem = path.stem  # "page-007"
     num_part = stem.split("-")[-1]
     return int(num_part)
+
+
+def is_image_valid(image_path: Path) -> bool:
+    """Ellenőrzi, hogy a PNG kép nem sérült/csonka-e.
+
+    Ha a Pillow csomag hiányzik, kivételt dob -- ezt NEM szabad sima
+    'sérült kép' esetként kezelni, mert az minden oldalt hibásan
+    kihagyna (lásd main() eleji ellenőrzést).
+    """
+    if PIL_IMPORT_ERROR is not None:
+        raise RuntimeError(
+            "A Pillow csomag nincs telepítve/elérhető (valószínűleg nincs "
+            "aktiválva a virtuális környezet: 'source .venv/bin/activate')."
+        ) from PIL_IMPORT_ERROR
+    try:
+        with Image.open(image_path) as im:
+            im.load()
+        return True
+    except Exception:
+        return False
+
+
+def regenerate_page_image(pdf_path: Path, images_dir: Path, page_num: int, dpi: int) -> bool:
+    """Egyetlen oldal képének újragenerálása a PDF-ből (sérült kép esetén)."""
+    prefix = images_dir / "page"
+    cmd = [
+        "pdftoppm", "-r", str(dpi), "-png",
+        "-f", str(page_num), "-l", str(page_num),
+        str(pdf_path), str(prefix),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"[hiba] {page_num}. oldal képének újragenerálása sikertelen: {result.stderr}",
+              file=sys.stderr)
+        return False
+    return True
 
 
 def run_tesseract(image_path: Path, lang: str) -> str:
@@ -140,13 +184,15 @@ def ai_correct_page(image_path: Path, raw_text: str, client, model: str) -> str:
                 max_tokens=2000,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_content}],
+                timeout=60.0,
             )
             text_blocks = [b.text for b in response.content if b.type == "text"]
             return "\n".join(text_blocks).strip()
         except Exception as e:
             print(f"[figyelmeztetés] AI-korrektúra hiba ({attempt}/{max_retries}): {e}",
                   file=sys.stderr)
-            time.sleep(2 * attempt)
+            if attempt < max_retries:
+                time.sleep(2 * attempt)
 
     print(f"[hiba] AI-korrektúra végleg sikertelen ehhez: {image_path.name}, "
           f"a nyers OCR-t használom helyette.", file=sys.stderr)
@@ -195,7 +241,16 @@ def main():
             print("[hiba] Nincs beállítva az ANTHROPIC_API_KEY a .env fájlban.",
                   file=sys.stderr)
             sys.exit(1)
-        client = anthropic.Anthropic(api_key=api_key)
+        # rövid timeout + saját retry-logika (ai_correct_page), hogy egy
+        # kapcsolati hiba ne fagyassza le percekre a feldolgozást
+        client = anthropic.Anthropic(api_key=api_key, timeout=60.0, max_retries=0)
+
+    if PIL_IMPORT_ERROR is not None:
+        print("[hiba] A Pillow csomag nem érhető el (a kép-sérülés-ellenőrzéshez "
+              "szükséges). Valószínűleg nincs aktiválva a virtuális környezet -- "
+              "futtasd előbb: source .venv/bin/activate -- vagy telepítsd: "
+              "pip install Pillow", file=sys.stderr)
+        sys.exit(1)
 
     images = convert_pdf_to_images(pdf_path, images_dir, args.dpi)
 
@@ -216,19 +271,35 @@ def main():
             print(f"[info] {page_num}. oldal már kész, kihagyva.")
             continue
 
-        print(f"[info] {page_num}. oldal OCR-je...")
-        raw_text = run_tesseract(image_path, args.lang)
-        raw_path = raw_dir / f"page-{page_num:03d}.txt"
-        raw_path.write_text(raw_text, encoding="utf-8")
+        try:
+            if not is_image_valid(image_path):
+                print(f"[figyelmeztetés] {page_num}. oldal képe sérült, "
+                      f"újragenerálom a PDF-ből...", file=sys.stderr)
+                regenerate_page_image(pdf_path, images_dir, page_num, args.dpi)
+                if not is_image_valid(image_path):
+                    print(f"[hiba] {page_num}. oldal képe az újragenerálás után is "
+                          f"sérült, ezt az oldalt most kihagyom (a következő "
+                          f"futtatáskor újra megpróbálom).", file=sys.stderr)
+                    continue
 
-        if args.ai_correct:
-            print(f"[info] {page_num}. oldal AI-korrektúrája...")
-            corrected = ai_correct_page(image_path, raw_text, client, args.model)
-        else:
-            corrected = raw_text
+            print(f"[info] {page_num}. oldal OCR-je...")
+            raw_text = run_tesseract(image_path, args.lang)
+            raw_path = raw_dir / f"page-{page_num:03d}.txt"
+            raw_path.write_text(raw_text, encoding="utf-8")
 
-        final_txt_path.write_text(corrected, encoding="utf-8")
-        print(f"[info] {page_num}. oldal kész -> {final_txt_path}")
+            if args.ai_correct:
+                print(f"[info] {page_num}. oldal AI-korrektúrája...")
+                corrected = ai_correct_page(image_path, raw_text, client, args.model)
+            else:
+                corrected = raw_text
+
+            final_txt_path.write_text(corrected, encoding="utf-8")
+            print(f"[info] {page_num}. oldal kész -> {final_txt_path}")
+        except Exception as e:
+            print(f"[hiba] Váratlan hiba a(z) {page_num}. oldal feldolgozásakor: {e}. "
+                  f"Kihagyom, és folytatom a következő oldallal (a következő "
+                  f"futtatáskor ezt az oldalt újra megpróbálom).", file=sys.stderr)
+            continue
 
     # Összefűzés egyetlen fájlba, oldalsorrendben
     all_final = sorted(final_dir.glob("page-*.txt"), key=page_number_from_filename)

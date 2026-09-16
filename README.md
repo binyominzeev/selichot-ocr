@@ -26,14 +26,27 @@ végez.
 ```bash
 sudo apt-get update
 sudo apt-get install -y tesseract-ocr tesseract-ocr-heb poppler-utils
-pip install anthropic python-dotenv  # csak ha AI-korrektúrát is használsz
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
 **macOS (Homebrew):**
 ```bash
 brew install tesseract tesseract-lang poppler
-pip install anthropic python-dotenv
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
+
+> ⚠️ **Fontos:** minden futtatás előtt aktiváld a virtuális környezetet:
+> ```bash
+> source .venv/bin/activate
+> ```
+> Ennélkül a szkript nem találja a `Pillow`/`anthropic`/`python-dotenv`
+> csomagokat -- ez pl. azt okozhatja, hogy minden képet "sérült"-nek jelez
+> (a Pillow hiánya miatt), vagy hogy az AI-korrektúra egyből hibával leáll.
+> A parancssorban az aktivált környezetet a `(.venv)` előtag jelzi.
 
 **Windows:** legegyszerűbb WSL (Windows Subsystem for Linux) alatt, Ubuntu
 disztribúcióval, és onnan a fenti Ubuntu-s lépéseket követni.
